@@ -1,0 +1,386 @@
+function out=OT_IPM(b,c,in,index,f_opt)
+% % % % % % % % % % % % % % % % % % % % % % % % % % %
+% 
+%   OT_IPM: main
+%   
+%   Solves the Optimal Transport linear program:
+%   
+%       min   c'*p
+%       s.t.  Ap=b, p>=0
+%
+%   INPUT
+%   b     :  m+n vector
+%   c     :  m*n vector
+%   index :  initial basis
+%   in    :  struct with fields                     [default]
+%    in.m        : dimension of the problem         [required]
+%    in.n        : dimension of the problem         [m]
+%    in.print    : print output to screen           [true]
+%    in.tol      : IPM tolerance                    [1e-6]
+%    in.maxit    : IPM max iterations number        [200]
+%    in.maxcc    : max number of correctors         [3]
+%    in.predtol  : CG tolerance for predictors      [1e-6]
+%    in.corrtol  : CG tolerance for correctors      [1e-3]
+%    in.CGmaxit  : CG max iterations number         [1000]
+%
+%   OUTPUT
+%   out   :  struct with fields
+%    out.time          : computational time
+%    out.iter          : IPM iterations
+%    out.CGiter        : CG iterations
+%    out.maxfill       : max % fill level of L
+%    out.solution      : sparse solution vector
+%    out.iterativeiter : number of IPM iterations with CG
+%    out.directiter    : number of IPM iterations with full factorization
+%    out.droptol       : best droptol reached for ichol
+%    out.coladded      : number of variables added
+%    out.colremoved    : number of variables removed
+%    out.finalcol      : final number of variables in the basis
+%    out.finalindex    : final basis
+%
+%
+%   Filippo Zanetti, 2022
+%
+% % % % % % % % % % % % % % % % % % % % % % % % % % %
+
+if size(index,2)>1
+    index=index';
+end
+q = length(index);
+
+in = CheckInput(in);
+
+C = reshape(c,[in.n,in.n]);%Yue added this.
+traj = zeros(in.maxit+1,1);%Yue added this.
+time = zeros(in.maxit+1,1);%Yue added this.
+feas = zeros(in.maxit+1,1);%Yue added this.
+
+tic
+%% Initialize
+m = in.m;
+n = in.n;
+mn = m*n;
+iter = 0;
+alpha_p = 0;
+alpha_s = 0;
+
+col_added = 0;
+col_removed = 0;
+Number_of_variables = 0;
+Variation_edges = 0;
+countdirect = 0;
+countiterative = 0;
+CGiter = 0;
+c_red = c(index);
+
+%starting point
+p_red = ones(q,1);
+y = zeros(m+n,1);
+s_red = ones(q,1);
+
+%indexes for reduced cost heuristic
+ind_small_c = find(c<in.cmax);
+ind_y1 = mod(ind_small_c,m);
+ind_y1(ind_y1==0) = m;
+ind_y2 = ceil(ind_small_c/m)+m;
+small_c = c(ind_small_c);
+
+%% Iteration
+% % % % % % % % % % % % % % % % % % % % % % % % % %
+%   Normal equations
+%
+%   ATA'dy = r1+AT(r2-P^(-1)r3)
+%   
+%   dp = T(A'dy-r2+P^(-1)r3)
+%   ds = P^(-1)(r3-Sdp)
+%
+%   r1 = b-Ap
+%   r2 = c-A'y-s
+%   r3 = sigma*mu*e-XSe
+%   T  = PS^(-1)
+%   mu = (p'*s)/mn
+%
+% % % % % % % % % % % % % % % % % % % % % % % % % %  
+
+r1 = b-operator_A(sparse([index;m*n],ones(q+1,1),[p_red;0]),m,n);
+r2 = c_red-operator_At_sparse(y,m,n,index)-s_red;
+mu = (p_red'*s_red)/q;
+
+if in.print
+    fprintf('\nIPM_iter     Pinf       Dinf         mu       alpha_p   alpha_s       PCG\n')
+end
+
+etime = 0; % Yue added this.
+
+while iter<in.maxit
+    
+%     if norm(r1)/(1+norm(b))<in.tol && norm(r2)/(1+norm(c_red))<in.tol && mu<in.tol
+%         if in.print
+%             fprintf('\n*** Optimal solution found ***\n')
+%         end
+%         break
+%     end
+    %Yue added the following lines
+    temp = toc;
+    p = sparse([index;m*n],ones(q+1,1),[p_red;0]);
+    sol = reshape(p,[n,n]);
+    sol = round_matrix(sol,b(1:n),b(n+1:2*n));
+    err = trace(C'*sol) - f_opt;
+    traj(iter+1) = err;
+    feas(iter+1) = norm(sol*ones(n,1) - b(1:n)) + norm(sol'*ones(n,1) - b(n+1:2*n));
+    etime = etime + toc - temp;
+    time(iter+1) = toc - etime;
+%     if  err <= f_opt*1e-6
+%         break;
+%     end
+    
+    %increase iteration counter
+    iter = iter+1;
+
+    %choose sigma
+    if iter==1 || min(alpha_p,alpha_s)<0.3
+        mu_target = mu*0.9;
+    else
+        mu_target = mu*0.1;
+    end
+    
+    CG_this_iter = [];
+    
+    %count iterative and direct iteerations
+    if strcmp(in.method,'direct')
+        countdirect = countdirect+1;
+    else
+        countiterative = countiterative+1;
+    end
+    
+    %prepare matrices for iteration
+    Mat = PrepareMatrices(p_red,s_red,index,in);
+    Snnz(iter) = nnz(Mat.S)/(n*n)*100;
+    Lnnz(iter) = nnz(Mat.Lfactor)/(n*(n+1)/2)*100;
+
+    %save number of variables and edges
+    Number_of_variables(iter) = q;
+    if iter>5
+        Variation_edges(iter) = (Number_of_variables(end)-Number_of_variables(end-5))/Number_of_variables(end-5);
+    end
+    
+    
+    %% Predictor direction
+
+    %compute right hand side
+    r3 = - p_red.*s_red+in.sigma_aff*mu_target;
+    rhs = r2-r3./p_red;
+    rhs = p_red.*rhs./s_red;
+    vec = sparse([index;m*n],ones(q+1,1),[rhs;0]);
+    rhs = r1+operator_A(vec,m,n);
+    rhs1 = rhs(1:m);
+    rhs2 = rhs(m+1:m+n);
+    rhsSchur = rhs2-Mat.V'*(rhs1./Mat.M);
+           
+    %solve linear system
+    [dy2,iterpcg] = LinearSolver(in,Mat,rhsSchur,in.predtol);
+
+    CG_this_iter = [CG_this_iter;iterpcg];
+    CGiter = CGiter+iterpcg;
+    
+    %find the rest of Newton direction
+    dy1 = (rhs1-Mat.V*dy2)./Mat.M;
+    dy = [dy1;dy2];
+    dp_red = p_red.*(operator_At_sparse(dy,m,n,index)-r2+r3./p_red)./s_red;
+    ds_red = (r3-dp_red.*s_red)./p_red;    
+    
+    %find stepsize
+    idp = dp_red < 0;
+    ids = ds_red < 0;
+    alpha_p = min([1;-p_red(idp)./dp_red(idp)]);
+    alpha_s = min([1;-s_red(ids)./ds_red(ids)]);
+    
+    %print to screen
+    if in.print
+        r1_temp = b-operator_A(sparse([index;m*n],ones(q+1,1),[(p_red+alpha_p*dp_red);0]),m,n);
+        r2_temp = c_red-operator_At_sparse((y+alpha_s*dy),m,n,index)-(s_red+alpha_s*ds_red);
+        mu_temp = ((p_red+alpha_p*dp_red)'*(s_red+alpha_s*ds_red))/q;
+        fprintf('Pred   %11.2e %11.2e %11.2e %9.2f %9.2f %9d %9.3f\n',norm(r1_temp)/(1+norm(b)),norm(r2_temp)/(1+norm(c_red)),full(mu_temp),full(alpha_p),full(alpha_s),iterpcg,Variation_edges(end))
+    end
+    
+    %% Multiple centrality correctors
+    
+    for k = 1:in.maxcc
+        
+        %find trial point
+        alpha_p_tilde = min(1.5*alpha_p+0.3,1);
+        alpha_s_tilde = min(1.5*alpha_s+0.3,1);
+        p_tilde = p_red+alpha_p_tilde*dp_red;
+        s_tilde = s_red+alpha_s_tilde*ds_red;
+
+        %complementarity of trial point
+        v_tilde = p_tilde.*s_tilde;
+        t = zeros(q,1);        
+        indexcc = (v_tilde<=in.gamma*mu_target);
+        t(indexcc) = in.gamma*mu_target-v_tilde(indexcc);
+        indexcc = (v_tilde>=mu_target/in.gamma);
+        t(indexcc) = mu_target/in.gamma-v_tilde(indexcc);
+        
+        %avoid large elements in t
+        t(t<-mu_target/in.gamma) = -mu_target/in.gamma;
+        t(t>2*mu_target/in.gamma) = 2*mu_target/in.gamma;
+        r3 = t;
+        
+        %compute right hand side
+        vec = sparse([index;m*n],ones(q+1,1),[r3./s_red;0]);
+        rhs = -operator_A(vec,m,n);
+        rhs1 = rhs(1:m);
+        rhs2 = rhs(m+1:m+n);
+        rhsSchur = rhs2-Mat.V'*(rhs1./Mat.M);
+                
+        %solve linear system
+        [dy2,iterpcg] = LinearSolver(in,Mat,rhsSchur,in.corrtol);
+
+        CG_this_iter = [CG_this_iter;iterpcg];
+        CGiter = CGiter+iterpcg;
+        
+        %compute rest of Newton direction
+        dy1 = (rhs1-Mat.V*dy2)./Mat.M;
+        dy_cor = [dy1;dy2];
+        dp_cor_red = p_red.*(operator_At_sparse(dy_cor,m,n,index)+r3./p_red)./s_red;
+        ds_cor_red = (r3-dp_cor_red.*s_red)./p_red;
+        
+        %temporary full directions
+        dp_temp = dp_red+dp_cor_red;
+        dy_temp = dy+dy_cor;
+        ds_temp = ds_red+ds_cor_red;
+
+        %temporary stepsize
+        idp = dp_temp < 0;
+        ids = ds_temp < 0;
+        alpha_p_temp = min([1;-p_red(idp)./dp_temp(idp)]);
+        alpha_s_temp = min([1;-s_red(ids)./ds_temp(ids)]);
+        
+        %check if direction is accepted
+        if (alpha_p_temp<alpha_p*1.01 && alpha_s_temp<alpha_s*1.01) ||...
+           (alpha_p_temp<alpha_p*.7) || (alpha_s_temp<alpha_s*.7)
+           break 
+        else
+            alpha_p = alpha_p_temp;
+            alpha_s = alpha_s_temp;
+            dp_red = dp_temp;
+            dy = dy_temp;
+            ds_red = ds_temp;
+        end
+        
+        %compute new point
+        p_cor_red = p_red+alpha_p*dp_red;
+        y_cor = y+alpha_s*dy;
+        s_cor_red = s_red+alpha_s*ds_red;
+        
+        %print to screen
+        if in.print
+            r1_temp = b-operator_A(sparse([index;m*n],ones(q+1,1),[p_cor_red;0]),m,n);
+            r2_temp = c_red-operator_At_sparse(y_cor,m,n,index)-s_cor_red;
+            mu_temp = (p_cor_red'*s_cor_red)/q;
+            fprintf('Corr   %11.2e %11.2e %11.2e %9.2f %9.2f %9d\n',norm(r1_temp)/(1+norm(b)),norm(r2_temp)/(1+norm(c_red)),full(mu_temp),full(alpha_p),full(alpha_s),iterpcg)        
+        end
+        
+        %stop correctors if direction is already good
+        if alpha_p>0.99 && alpha_s>0.99
+            break
+        end
+        
+        
+    end
+    
+    %perform step
+    p_red = p_red+in.rho*alpha_p*dp_red;
+    y = y+in.rho*alpha_s*dy;
+    s_red = s_red+in.rho*alpha_s*ds_red;
+    
+    %compute reduced costs
+    if mod(iter,3)>0
+        %use heuristic
+        redcost_red = small_c-y(ind_y1)-y(ind_y2);
+        ind_redcost = (redcost_red<0);
+        redcost_red = redcost_red(ind_redcost);
+        ind_redcost = ind_small_c(ind_redcost);
+        [index,p_red,s_red,coladd,colrem] = updateindexred_heuristic(index,redcost_red,ind_redcost,m,p_red,s_red,mu);
+    else
+        %use full redcost
+        redcost = c-operator_At(y,m,n);  
+        [index,p_red,s_red,coladd,colrem] = updateindexred_full(index,redcost,m,p_red,s_red,mu);
+    end
+    
+    q = length(index);
+    c_red = c(index);
+    col_added = col_added+coladd;
+    col_removed = col_removed+colrem;
+     
+    % Prepare next iteration    
+    r1 = b-operator_A(sparse([index;m*n],ones(q+1,1),[p_red;0]),m,n);
+    r2 = c_red-operator_At_sparse(y,m,n,index)-s_red;
+    mu = (p_red'*s_red)/q;
+
+    %print to screen
+    if in.print
+        fprintf('Iteration %d: Columns %d, Add %d, Remove %d\n',iter,length(index),coladd,colrem)
+        fprintf('Method: %10s\nNNZ L: %10.1f%%\nNNZ S: %10.1f%%\n\n',in.method,Lnnz(iter),Snnz(iter))
+    end
+    
+    %switch method based on variation of edges
+    if iter>5 && strcmp(in.method,'iterative') && Variation_edges(iter)<in.varedges
+        in.method = 'direct';
+    end
+    
+    %update droptol if CG is struggling
+    if strcmp(in.method,'iterative') && max(CG_this_iter)>50
+        in.droptol = in.droptol/2;
+    end
+  
+    
+end
+
+IPM_time = toc - etime; %Yue modified this.
+
+%compute solution
+p = sparse([index;m*n],ones(q+1,1),[p_red;0]);
+sol = reshape(p,[n,n]);
+    sol = round_matrix(sol,b(1:n),b(n+1:2*n));
+    err = trace(C'*sol) - f_opt;
+    traj(iter+1) = err;
+    feas(iter+1) = norm(sol*ones(n,1) - b(1:n)) + norm(sol'*ones(n,1) - b(n+1:2*n));
+    etime = etime + toc - temp;
+    time(iter+1) = toc - etime;
+mem = whos;
+
+%% output struct
+out = struct();
+out.time = IPM_time;
+out.iter = iter;
+out.CGiter = CGiter;
+out.maxfill = max(Lnnz);
+out.solution = p;
+out.lagrange = y;
+out.iterativeiter = countiterative;
+out.directiter = countdirect;
+out.droptol = in.droptol;
+out.coladded = col_added;
+out.colremoved = col_removed;
+out.finalcol = length(index);
+out.finalindex = index;
+out.mem = mem;
+
+%% Print
+if in.print
+    fprintf('\nTime: %f\n',IPM_time)
+    fprintf('IPM iter: %d\n',iter)
+    fprintf('CG iter: %d\n',CGiter)
+    fprintf('Final columns: %d out of %.2fM (expected %d)\n',length(index),mn*1e-6,m+n-1)
+    fprintf('Columns added: %d\n',col_added)
+    fprintf('Columns removed: %d\n',col_removed)
+    fprintf('Iterations with iterative method: %d (best droptol %.2e)\n',countiterative,in.droptol)
+    fprintf('Iterations with direct method: %d\n',countdirect)
+    fprintf('Maximum fill level: %.2f%%\n',max(Lnnz))
+end
+
+
+% % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % %
+% END OF FUNCTION OT_IPM
+% % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % % %
