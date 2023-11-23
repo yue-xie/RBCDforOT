@@ -8,7 +8,7 @@ Experiment5_2.mlx is the matlab file generating the figures and table in Section
 
 Experiment5_3.mlx is the matalbe file generating Figure 9: Solving large-scale problem via ARBCD. 
 
-RBCD0.mlx, reRBCD.mlx, ARBCD.mlx, SKstab.m, IPM folder are the algorithms used in these experiments. The file names are strongly related to the algorithm names in the paper. In particular, SKstab is the stabelized Sinkhorn's algorithm; IPM stands for an interior point inspired algorithm. 
+RBCD0.mlx, reRBCD.mlx, ARBCD.mlx, SKstab.m, IPM folder are the algorithms used in these experiments. The file names are strongly related to the algorithm names in the paper. In particular, SKstab is the stabelized Sinkhorn's algorithm; IPM stands for an interior point inspired algorithm coded by authors of the following article: Zanetti, F., Gondzio, J., An interior point–inspired algorithm for linear programs arising in discrete optimal transport, INFORMS Journal on Computing (2023). We have made minimum modification of this algorithm for comparison.
 
 round_matrix.m is a file implementing the rounding procedure in the paper: J. Altschuler, J. Niles-Weed, and P. Rigollet, Near-linear time approximation algorithms for optimal transport via Sinkhorn iteration, Advances in Neural Information Processing Systems, 30 (2017).
 
