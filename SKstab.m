@@ -41,6 +41,9 @@ while k < maxIter
         residual = trace(C'*X_k)-f_opt;
         fval = [fval;residual];
         time = [time;etime];
+        if etime > 8.7659e+03
+            break;
+        end
     end
     if mod(k,1000) == 0
         str = ['k = ',num2str(k),', accuracy = ',num2str(residual)];
